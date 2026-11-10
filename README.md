@@ -18,7 +18,6 @@ pyjogja10th-temporal/
 ├── README.md                # Talk overview and repository map
 ├── deck_plan.md             # Talk outline, preparation, and timing
 ├── deck.md                  # Article-like rehearsal material
-├── prompt.md                # Historical planning notes
 ├── demo/
 │   ├── README.md            # Demo setup and run instructions
 │   ├── quickstart/          # Python SDK Hello World example
