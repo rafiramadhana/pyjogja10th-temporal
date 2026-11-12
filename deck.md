@@ -12,53 +12,116 @@ deposit_id = act_deposit(amount="10000.00", currency="IDR")
 
 The sequence is short, but the process can stop between the calls. After restart, ordinary Python memory does not tell the application whether withdrawal completed.
 
-## 1.2: Recovery adds application code
+## 1.2: Recovery adds retry and timeout code
 
-Teams may add retries, saved progress, and idempotency keys so a restarted process can continue. Each mechanism helps, but the application must keep them consistent.
+The application can retry timeouts with a limited number of attempts, backoff, a timeout for each call, and a deadline for the whole transfer. This helps with temporary failures, but a retry can repeat an operation whose result was uncertain.
 
 ```python
-from time import monotonic, sleep
+from datetime import datetime, timedelta, timezone
+from time import sleep
 
 
-def run_transfer(request_id):
-    deadline = monotonic() + 30
+def retry_step(action, deadline):
     for attempt in range(3):
+        remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+        if remaining <= 0:
+            raise TimeoutError("transfer deadline exceeded")
         try:
-            # A stable key helps the service recognize a repeated request.
-            withdrawal_id = act_withdraw(
-                amount="10000.00",
-                currency="IDR",
-                idempotency_key=request_id,
-                timeout=5,
-            )
-            break
+            # Bound each service call by five seconds and the shared deadline.
+            return action(timeout=min(5, remaining))
         except TimeoutError:
-            if attempt == 2 or monotonic() >= deadline:
+            remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+            if attempt == 2 or remaining <= 0:
                 raise
-            sleep(min(2**attempt, deadline - monotonic()))
+            # Back off between attempts, without sleeping past the deadline.
+            sleep(min(2**attempt, remaining))
 
-    # The app must also decide how to safely retry and track this next step.
-    deposit_id = act_deposit(
-        amount="10000.00",
-        currency="IDR",
-        idempotency_key=request_id,
-        timeout=5,
-    )
+deadline = datetime.now(timezone.utc) + timedelta(seconds=30)
+withdrawal_id = retry_step(
+    lambda timeout: act_withdraw(
+        amount="10000.00", currency="IDR", timeout=timeout
+    ),
+    deadline,
+)
+deposit_id = retry_step(
+    lambda timeout: act_deposit(
+        amount="10000.00", currency="IDR", timeout=timeout
+    ),
+    deadline,
+)
 ```
 
-The snippet adds retry limits, delays, per-call timeouts, an overall deadline, and stable request keys. It still needs durable progress storage so a restart can tell whether withdrawal already completed.
+Each step gets at most three attempts with exponential backoff, and the transfer shares a 30-second deadline. The application still needs to record completed steps and prevent duplicate effects after a restart.
 
-## 1.3: Five recovery complexities
+## 1.3: Track progress and prevent duplicate effects
+
+To recover after a restart, the application must save progress and allow only the transitions `started → withdrawn → completed`. Stable idempotency keys let the external service recognize a repeated request if an operation succeeded before the application saved its result.
+
+```python
+# Repeat the retry helper to show how the code grows from 1.2.
+from datetime import datetime, timezone
+from time import sleep
+
+
+def retry_step(action, deadline):
+    for attempt in range(3):
+        remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+        if remaining <= 0:
+            raise TimeoutError("transfer deadline exceeded")
+        try:
+            return action(timeout=min(5, remaining))
+        except TimeoutError:
+            remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+            if attempt == 2 or remaining <= 0:
+                raise
+            sleep(min(2**attempt, remaining))
+
+
+# Storage creates status="started" and expires_at on first call, then reloads them.
+# load_transfer and save_transfer read and write durable application storage.
+state = load_transfer(request_id)
+deadline = state["expires_at"]
+
+if state["status"] == "started":
+    withdrawal_id = retry_step(
+        lambda timeout: act_withdraw(
+            amount="10000.00",
+            currency="IDR",
+            idempotency_key=f"{request_id}:withdraw",
+            timeout=timeout,
+        ),
+        deadline,
+    )
+    state["withdrawal_id"] = withdrawal_id
+    state["status"] = "withdrawn"
+    save_transfer(request_id, state)
+
+if state["status"] == "withdrawn":
+    deposit_id = retry_step(
+        lambda timeout: act_deposit(
+            amount="10000.00",
+            currency="IDR",
+            idempotency_key=f"{request_id}:deposit",
+            timeout=timeout,
+        ),
+        deadline,
+    )
+    state["deposit_id"] = deposit_id
+    state["status"] = "completed"
+    save_transfer(request_id, state)
+```
+
+The storage helpers are illustrative, and each operation uses its own stable key across retries. If the application crashes after an external operation succeeds but before progress is saved, it can safely repeat that operation only if the external service honors the idempotency key.
 
 | Complexity | Description |
 |---|---|
-| Safe retries | Decide which failures can be retried and when to stop. |
-| Saved progress | Record completed steps so recovery can continue at the right point. |
-| Duplicate protection | Make repeated requests safe when a timeout leaves the outcome uncertain. |
-| Time limits | Choose deadlines for each attempt and the overall process. |
-| Troubleshooting | See what completed and give an operator a safe recovery point. |
+| Retry | Choose which failures to retry, how many attempts to allow, and the backoff. |
+| State machine | Track progress and allow only valid transitions between steps. |
+| Idempotency | Make repeated requests safe when an earlier result is uncertain. |
+| Timeout | Bound each attempt and the total time allowed for the process. |
+| Troubleshooting | Reconstruct what happened from logs while under pressure. |
 
-These concerns grow as a process gains steps and external systems. Temporal provides durable Workflow state and Activity retry behavior so application code can focus on the business sequence.
+Together, these concerns make recovery logic grow as a process gains steps and external systems. Temporal provides durable Workflow state and Activity retry behavior so application code can focus on the business sequence.
 
 ## 2.1: Temporal concepts
 
@@ -75,6 +138,14 @@ Durable Workflow execution is the combined behavior: Temporal stores progress in
 ## 2.2: The concepts in Quickstart code
 
 The Quickstart keeps each role small. `greet` is the Activity, `SayHelloWorkflow` calls it, the Worker registers both, and the starter launches the Workflow.
+
+```text
+demo/quickstart/
+├─ activities.py  # Performs the greeting
+├─ workflows.py   # Coordinates the Activity
+├─ worker.py      # Registers and runs the Workflow and Activity
+└─ starter.py     # Starts the Workflow and prints its result
+```
 
 ```python
 # activities.py: the Activity does the greeting work.
@@ -99,6 +170,7 @@ with workflow.unsafe.imports_passed_through():
 class SayHelloWorkflow:
     @workflow.run
     async def run(self, name: str) -> str:
+        # Schedule the Activity and wait for its result.
         return await workflow.execute_activity(
             greet,
             name,
@@ -120,13 +192,16 @@ with workflow.unsafe.imports_passed_through():
 
 
 async def main() -> None:
+    # Connect this Worker to the Temporal Server.
     client = await Client.connect("localhost:7233")
+    # Register the Workflow and Activity code this Worker can execute.
     worker = Worker(
         client,
         task_queue="my-task-queue",
         workflows=[SayHelloWorkflow],
         activities=[greet],
     )
+    # Poll the Task Queue and run tasks as they arrive.
     await worker.run()
 
 
@@ -145,7 +220,9 @@ from workflows import SayHelloWorkflow
 
 
 async def main() -> None:
+    # Connect the starter to the Temporal Server.
     client = await Client.connect("localhost:7233")
+    # Start the Workflow and wait until it returns a result.
     result = await client.execute_workflow(
         SayHelloWorkflow.run,
         "Temporal",
