@@ -16,6 +16,8 @@ The sequence is short, but the process can stop between the calls. After restart
 
 The application can retry timeouts with a limited number of attempts, backoff, a timeout for each call, and a deadline for the whole transfer. This helps with temporary failures, but a retry can repeat an operation whose result was uncertain.
 
+**What if a call temporarily fails? How long should we keep retrying?**
+
 ```python
 from datetime import datetime, timedelta, timezone
 from time import sleep
@@ -56,6 +58,8 @@ Each step gets at most three attempts with exponential backoff, and the transfer
 ## 1.3: Track progress and prevent duplicate effects
 
 To recover after a restart, the application must save progress and allow only the transitions `started → withdrawn → completed`. Stable idempotency keys let the external service recognize a repeated request if an operation succeeded before the application saved its result.
+
+**What if the process restarts after withdrawal? What if withdrawal succeeded, but we never saved its result?**
 
 ```python
 # Repeat the retry helper to show how the code grows from 1.2.
@@ -113,15 +117,36 @@ if state["status"] == "withdrawn":
 
 The storage helpers are illustrative, and each operation uses its own stable key across retries. If the application crashes after an external operation succeeds but before progress is saved, it can safely repeat that operation only if the external service honors the idempotency key.
 
-| Complexity | Description |
-|---|---|
-| Retry | Choose which failures to retry, how many attempts to allow, and the backoff. |
-| State machine | Track progress and allow only valid transitions between steps. |
-| Idempotency | Make repeated requests safe when an earlier result is uncertain. |
-| Timeout | Bound each attempt and the total time allowed for the process. |
-| Troubleshooting | Reconstruct what happened from logs while under pressure. |
+| Complexity | Description | How Temporal handles it |
+|---|---|---|
+| Retry | Retry rules and backoff. | Applies configured Retry Policies. |
+| State machine | Track progress and transitions. | Restores state through Event History and Replay. |
+| Idempotency | Prevent duplicate effects. | Reuses recorded results; external effects still need duplicate protection. |
+| Timeout | Limit attempts and execution time. | Enforces configured timeouts. |
+| Troubleshooting | Understand what went wrong. | Shows status and Event History in Temporal UI. |
 
-Together, these concerns make recovery logic grow as a process gains steps and external systems. Temporal provides durable Workflow state and Activity retry behavior so application code can focus on the business sequence.
+The Workflow keeps the business sequence to two ordered Activity calls. Temporal records progress and applies configured retries and timeouts, while external Activities still need duplicate protection.
+
+```python
+# Inside WfTransfer.run: configure each Activity, then keep the business steps clear.
+activity_options = {
+    "start_to_close_timeout": timedelta(seconds=30),
+    "retry_policy": RetryPolicy(maximum_attempts=3),
+}
+
+withdrawal = await workflow.execute_activity(
+    act_withdraw,
+    WithdrawalInput(transfer.request_id, transfer.amount, transfer.currency),
+    **activity_options,
+)
+deposit = await workflow.execute_activity(
+    act_deposit,
+    DepositInput(transfer.request_id, transfer.amount, transfer.currency),
+    **activity_options,
+)
+```
+
+The Activity code, Worker setup, and idempotency safeguards still exist, but the Workflow coordinates the transfer with two calls.
 
 ## 2.1: Temporal concepts
 

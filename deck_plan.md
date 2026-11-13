@@ -43,7 +43,7 @@ Outlines/
 |---|---|---|
 | The failure problem | A withdrawal succeeds before a deposit fails | Introduce the two-step dummy transaction and show the direct code, then the risk of stopping between steps. |
 |  | Simple code becomes recovery code | Extend the simple calls with imports, a complete `retry_step` helper, bounded attempts, backoff, per-call timeouts, and a shared deadline. |
-|  | Track progress and prevent duplicate effects | Repeat the imports and `retry_step` helper, add persisted state transitions and per-step idempotency keys, then summarize the five recovery complexities in a table. |
+|  | Track progress and prevent duplicate effects | Repeat the imports and `retry_step` helper, add persisted state transitions and per-step idempotency keys, summarize the five recovery complexities, then show the concise Temporal Workflow sequence. |
 | The Temporal approach | Core Temporal concepts | Explain Workflow, Activity, Worker, Event History, and Replay in a `[Concept, What, Why]` table. |
 |  | Concepts in the Python Quickstart | Start with a commented file tree, then show how `SayHelloWorkflow`, `greet`, the Worker, and starter map to those concepts. |
 |  | Durable Workflows and Replay | Explain how Event History lets another Worker rebuild Workflow state and reuse the recorded Activity result. Use an iceberg overview to bridge into the transfer demos. |
@@ -61,6 +61,7 @@ Outlines/
 - Extend that example with persisted `started → withdrawn → completed` progress and distinct stable idempotency keys for withdrawal and deposit.
 - Repeat the imports and complete `retry_step` definition in the third example so the cumulative recovery code growth is visible.
 - Show a five-row table ordered Retry, State machine, Idempotency, Timeout, and Troubleshooting.
+- End with a compact `WfTransfer` excerpt that calls withdrawal then deposit using the demo's 30-second Activity timeout and three-attempt Retry Policy; frame the comparison around the short business sequence, with setup and Activity safeguards still required.
 
 **Key Takeaways**
 - A process can fail after one step has already succeeded.

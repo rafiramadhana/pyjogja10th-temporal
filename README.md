@@ -1,6 +1,6 @@
 # PyJogja 10th: Durable Execution with Temporal
 
-[Google Slides](https://docs.google.com/presentation/d/1Fy9t_RGluFqHhAerZJHrRPW4GBOuvcoe3m5b52Tw0uo/edit?usp=sharing) — work in progress
+[Google Slides](https://docs.google.com/presentation/d/1Fy9t_RGluFqHhAerZJHrRPW4GBOuvcoe3m5b52Tw0uo/edit?usp=sharing)
 
 ## Background
 
